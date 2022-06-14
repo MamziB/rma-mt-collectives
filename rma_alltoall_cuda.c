@@ -18,15 +18,15 @@
 
 /* USERS  OPTIONS */
 #define MSG_SIZE    1966080
-#define THREAD_NUM  16
-#define ITER        100
+#define THREAD_NUM  1
+#define ITER        200
 #define WARMUP      20
-#define USE_FETCH   0 /* use atmoc fetch-ops to realize the  put completion */
-#define FORCE_FENCE 0 /* call win fence even if fetch-ops is used for put completion */
+#define USE_FETCH   1 /* use atmoc fetch-ops to realize the  put completion */
+#define FORCE_FENCE 1 /* call win fence even if fetch-ops is used for put completion */
 #define MAX_NPROCS  64
 /* use device memory for send buffers and window buffers.
                          Comment out if not needed  */
-//#define CUDA_ENABLED
+#define CUDA_ENABLED
 
 //#define MESSAGE_PIPELINING
 /* do not chunk the message instead, give subset
@@ -34,7 +34,7 @@ of targets to each thread */
 
 #define DEBUG_TIMERS
 
-//#define VALIDATION
+#define VALIDATION
 /* data validation */
 
 /* END OF USERS  OPTIONS */
@@ -64,7 +64,8 @@ typedef struct arg_struct {
 
 #ifdef DEBUG_TIMERS
 double t_barrier_lat=0;
-double wallclock=0;
+double wallclock=0, fence_time=0, fetch_time=0, put_time=0, start_puts=0,
+       start_fetch=0, start_fence=0, start_validation=0, validation_time=0;
 #endif
 double total=0;
 pthread_barrier_t barrier;
@@ -100,9 +101,20 @@ void * do_alltoall(void * args ) {
     }
 #endif
 
+    thread_barrier(tid, 0);
 
-
-
+    if (!tid) {
+#ifdef CUDA_ENABLED
+        memset(tmpbuf, 0, input->winbuf_size);
+        ret = cudaMemset(input->winbuf, 0, input->winbuf_size);
+        if (ret != cudaSuccess) {
+            fprintf(stderr, "cudaMemset failed"); exit(1);
+        }
+#else
+        memset(input->winbuf, 0, sizeof(input->winbuf));
+#endif
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
     thread_barrier(tid, 0);
 
 #ifdef DEBUG_TIMERS
@@ -117,6 +129,7 @@ void * do_alltoall(void * args ) {
 #endif
     for (int i = 0; i < ITER+WARMUP; i++) {
         if (!tid) {
+#ifdef VALIDATION
 #ifdef CUDA_ENABLED
             memset(tmpbuf, 0, input->winbuf_size);
             ret = cudaMemset(input->winbuf, 0, input->winbuf_size);
@@ -125,6 +138,7 @@ void * do_alltoall(void * args ) {
             }
 #else
             memset(input->winbuf, 0, sizeof(input->winbuf));
+#endif
 #endif
             MPI_Barrier(MPI_COMM_WORLD);
         }
@@ -135,6 +149,11 @@ void * do_alltoall(void * args ) {
             start = MPI_Wtime();
         }
 
+#ifdef DEBUG_TIMERS
+        if (!tid) {
+            start_puts = MPI_Wtime();
+        }
+#endif
 #ifdef MESSAGE_PIPELINING
         recv_disp = input->my_rank*input->msg_size;
         for (int peer=0; peer < input->comm_size/THREAD_NUM; peer++) {
@@ -154,9 +173,19 @@ void * do_alltoall(void * args ) {
 
         }
 #endif
+#ifdef DEBUG_TIMERS
+        if (!tid && i >= WARMUP) {
+            put_time += MPI_Wtime() - start_puts;
+        }
+#endif
 
         (i >= WARMUP)?thread_barrier(tid, 1):thread_barrier(tid, 0);
 
+#ifdef DEBUG_TIMERS
+        if (!tid) {
+            start_fetch = MPI_Wtime();
+        }
+#endif
 #ifdef MESSAGE_PIPELINING
         if (USE_FETCH) {
             for (int peer=0; peer < input->comm_size/THREAD_NUM; peer++) {
@@ -179,21 +208,41 @@ void * do_alltoall(void * args ) {
             }
         }
 #endif
+#ifdef DEBUG_TIMERS
+        if (!tid && i >= WARMUP) {
+            fetch_time += MPI_Wtime() - start_fetch;
+        }
+#endif
         if (USE_FETCH) {
             (i >= WARMUP)?thread_barrier(tid, 1):thread_barrier(tid, 0);
         }
 
         if (!tid) {
+#ifdef DEBUG_TIMERS
+        if (!tid) {
+            start_fence = MPI_Wtime();
+        }
+#endif
             if (!USE_FETCH || FORCE_FENCE) {
                 MPI_Win_fence(0, *input->window);
             } else {
                 MPI_Barrier(MPI_COMM_WORLD);
             }
+#ifdef DEBUG_TIMERS
+        if (!tid && i >= WARMUP) {
+            fence_time += MPI_Wtime() - start_fence;
+        }
+#endif
 
             if (i >= WARMUP)
                 total += MPI_Wtime() - start;
 
 #ifdef VALIDATION
+#ifdef DEBUG_TIMERS
+        if (!tid) {
+            start_validation = MPI_Wtime();
+        }
+#endif
             /* data validation */
 #ifdef CUDA_ENABLED
             ret = cudaMemcpy(tmpbuf, input->winbuf, input->winbuf_size,
@@ -223,8 +272,14 @@ void * do_alltoall(void * args ) {
                     }
                 }
             }
+#ifdef DEBUG_TIMERS
+        if (!tid && i >= WARMUP) {
+            validation_time += MPI_Wtime() - start_validation;
+        }
+#endif
             /* end of data validation */
 #endif
+            MPI_Barrier(MPI_COMM_WORLD);
         }
         thread_barrier(tid, 0);
     }
@@ -333,8 +388,10 @@ int main(int argc, char* argv[])
 #ifdef DEBUG_TIMERS
 
         printf("================== PROFILING TIMERS ===================\n");
-        printf("Wallclock Time:\t%.2fms   \nAlltoall Time:\t%.2fms  \nBarrier Time:\t%.2fms   \n",
-                wallclock*1e3, total*1e3, t_barrier_lat*1e3);
+        printf("Wallclock Time:\t%.2fms   \nAlltoall Time:\t%.2fms  \nBarrier Time:\t%.2fms   \n"
+            "Fetch Time:\t%.2fms   \nPut Time:\t%.2fms   \nFence Time:\t%.2fms  \nCheck Time:\t%.2fms\n",
+                wallclock*1e3, total*1e3, t_barrier_lat*1e3,
+                fetch_time*1e3, put_time*1e3, fence_time*1e3, validation_time*1e3);
         printf("=======================================================\n");
 #endif
     }
