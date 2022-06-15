@@ -4,8 +4,7 @@
  *  Receive buffer is realized by the window, incoming data
  *  is stored in window only
  *
- *  Threads are utilized to to break down the messages and have
- *  higher parallelism
+ *  Threads are utilized to gain higher parallelism
  *
  * */
 
@@ -34,7 +33,7 @@ of targets to each thread */
 
 //#define DEBUG_TIMERS
 
-#define VALIDATION
+//#define VALIDATION
 /* data validation */
 
 /* END OF USERS  OPTIONS */
@@ -120,7 +119,7 @@ void * do_alltoall(void * args ) {
     int tid = input->tid;
     char val;
     double start=0;
-    int fetch=1, result=0;
+    int fetch=0, result=0;
 #ifdef CUDA_ENABLED
     char *tmpbuf;
     int ret = 0;
@@ -230,7 +229,7 @@ void * do_alltoall(void * args ) {
             for (int peer=0; peer < input->comm_size; peer++) {
                 target = (input->my_rank + peer) % input->comm_size;
                 MPI_Fetch_and_op(&fetch, &result, MPI_INT, target, 0 /*input->msg_size *
-                        input->comm_size * sizeof(char) + input->my_rank*/, MPI_NO_OP,
+                        input->comm_size * sizeof(char) + input->my_rank*/, MPI_SUM,
                         *input->window);
 
             }
