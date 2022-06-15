@@ -18,7 +18,7 @@
 
 /* USERS  OPTIONS */
 #define MSG_SIZE    1966080
-#define THREAD_NUM  1
+#define THREAD_NUM  16
 #define ITER        200
 #define WARMUP      20
 #define USE_FETCH   1 /* use atmoc fetch-ops to realize the  put completion */
@@ -32,7 +32,7 @@
 /* do not chunk the message instead, give subset
 of targets to each thread */
 
-#define DEBUG_TIMERS
+//#define DEBUG_TIMERS
 
 #define VALIDATION
 /* data validation */
@@ -69,6 +69,8 @@ double wallclock=0, fence_time=0, fetch_time=0, put_time=0, start_puts=0,
 #endif
 double total=0;
 pthread_barrier_t barrier;
+volatile int thread_wait_counter1=0, thread_wait_counter2=0;
+pthread_mutex_t count_mutex;
 
 static inline void thread_barrier(int tid, int enable_timer) {
 
@@ -78,7 +80,33 @@ static inline void thread_barrier(int tid, int enable_timer) {
         start = MPI_Wtime();
     }
 #endif
-    pthread_barrier_wait(&barrier);
+    pthread_barrier_wait(&barrier); 
+#if 0
+    pthread_mutex_lock(&count_mutex);
+    thread_wait_counter1++;
+    pthread_mutex_unlock(&count_mutex);
+
+    if (!tid) {
+        while(thread_wait_counter1 != THREAD_NUM) {};
+        thread_wait_counter1 = 0;
+    } else {
+        while(thread_wait_counter1 != 0) {}; 
+    }
+
+    pthread_mutex_lock(&count_mutex);
+    thread_wait_counter2++;
+    pthread_mutex_unlock(&count_mutex);
+
+    if (!tid) {
+        while(thread_wait_counter2 != THREAD_NUM) {};
+        thread_wait_counter2 = 0;
+    } else {
+        while(thread_wait_counter2 != 0) {}; 
+    }
+
+    //printf("got out tid=%d\n", tid);
+#endif
+
 #ifdef DEBUG_TIMERS
     if (!tid && enable_timer) {
         t_barrier_lat += MPI_Wtime() - start;
@@ -201,8 +229,8 @@ void * do_alltoall(void * args ) {
         if (!tid && USE_FETCH) {
             for (int peer=0; peer < input->comm_size; peer++) {
                 target = (input->my_rank + peer) % input->comm_size;
-                MPI_Fetch_and_op(&fetch, &result, MPI_INT, target, input->msg_size *
-                        input->comm_size * sizeof(char) + input->my_rank, MPI_SUM,
+                MPI_Fetch_and_op(&fetch, &result, MPI_INT, target, 0 /*input->msg_size *
+                        input->comm_size * sizeof(char) + input->my_rank*/, MPI_NO_OP,
                         *input->window);
 
             }
@@ -236,6 +264,7 @@ void * do_alltoall(void * args ) {
 
             if (i >= WARMUP)
                 total += MPI_Wtime() - start;
+
 
 #ifdef VALIDATION
 #ifdef DEBUG_TIMERS
